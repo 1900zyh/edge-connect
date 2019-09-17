@@ -2,7 +2,7 @@
     "save_dir": "release_model/",
     "seed": 2020,
     "data_loader": {
-        "name": "celebahq", 
+        "name": "places2", 
         "zip_root": "../datazip",
         "flist_root": "../flist",
         "w": 512,

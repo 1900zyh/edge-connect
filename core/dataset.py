@@ -53,10 +53,6 @@ class Dataset(torch.utils.data.Dataset):
     mask_path = os.path.dirname(self.mask[m_index]) + '.zip'
     mask_name = os.path.basename(self.mask[m_index])
     mask = ZipReader.imread(mask_path, mask_name).convert('L')
-    # load edge and gray image
-    img_gray = rgb2gray(img)
-    mask = self.load_mask(img, index)
-    edge = canny(img_gray, sigma=sigma, mask=mask).astype(np.float)
     # augment 
     if self.split == 'train': 
       img = transforms.RandomHorizontalFlip()(img)
@@ -66,8 +62,11 @@ class Dataset(torch.utils.data.Dataset):
       mask = mask.filter(ImageFilter.MaxFilter(3))
     img = img.resize((self.w, self.h))
     mask = mask.resize((self.w, self.h), Image.NEAREST)
-    return F.to_tensor(img)*2-1., F.to_tensor(mask), img_name
-    return self.to_tensor(img), self.to_tensor(img_gray), self.to_tensor(edge), self.to_tensor(mask)
+    
+    # load edge and gray image
+    img_gray = img.convert('L')
+    edge = canny(img_gray, sigma=2, mask=mask).astype(np.float)
+    return F.to_tensor(img), F.to_tensor(img_gray), self.to_tensor(edge), F.to_tensor(mask), img_name
 
   def create_iterator(self, batch_size):
     while True:

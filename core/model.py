@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from core.spectral_norm import spectral_norm as _spectral_norm
 
 
 class BaseNetwork(nn.Module):
@@ -207,6 +208,6 @@ class ResnetBlock(nn.Module):
 
 def spectral_norm(module, mode=True):
     if mode:
-        return nn.utils.spectral_norm(module)
+        return _spectral_norm(module)
 
     return module

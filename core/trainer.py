@@ -23,8 +23,8 @@ import torch.distributed as dist
 
 from core.dataset import Dataset
 from core.utils import set_seed, set_device, Progbar, postprocess
-from core.model import InpaintGenerator, Discriminator
-
+from core.model import EdgeGenerator, InpaintGenerator, Discriminator
+from core.loss import AdversarialLoss, PerceptualLoss, StyleLoss
 from core import metric as module_metric
 
 
@@ -56,7 +56,11 @@ class Trainer():
       batch_size= 1, shuffle=None, num_workers=config['data_loader']['num_workers'],
       pin_memory=True, sampler=self.valid_sampler, worker_init_fn=worker_init_fn)
 
-    # set up metrics
+    # set up losses and metrics
+    self.adversarial_loss = AdversarialLoss(type=self.config['losses']['GAN_LOSS'])
+    self.perceptual_loss = PerceptualLoss()
+    self.style_loss = StyleLoss()
+    self.l1_loss = nn.L1Loss()
     self.metrics = {met: getattr(module_metric, met) for met in config['metrics']}
     self.dis_writer = None
     self.gen_writer = None
@@ -70,36 +74,31 @@ class Trainer():
     self.log_args = self.config['logger']
     self.train_args = self.config['trainer']
 
-    # set models
-    
-    # generator input: [grayscale(1) + edge(1) + mask(1)]
-    # discriminator input: (grayscale(1) + edge(1))
-    generator = EdgeGenerator(use_spectral_norm=True)
-    discriminator = Discriminator(in_channels=2, use_sigmoid=config.GAN_LOSS != 'hinge')
-    
-    # generator input: [rgb(3) + edge(1)]
-    # discriminator input: [rgb(3)]
-    generator = InpaintGenerator()
-    discriminator = Discriminator(in_channels=3, use_sigmoid=config.GAN_LOSS != 'hinge')
-        
-
-    self.netG = set_device(InpaintGenerator())
-    self.netD = set_device(Discriminator(in_channels=3, use_sigmoid=False))
-    self.optimG = optim.Adam(filter(lambda p: p.requires_grad, self.netG.parameters()),
-      lr=float(config['optimizer']['lr']), betas=(config['optimizer']['beta1'], config['optimizer']['beta2']))
-    self.optimD = optim.Adam(params=self.netD.parameters(),
-      lr=float(config['optimizer']['lr']), betas=(config['optimizer']['beta1'], config['optimizer']['beta2']))
+    # Edgegenerator input: [grayscale(1) + edge(1) + mask(1)], discriminator input: (grayscale(1) + edge(1))
+    self.edgeG = set_device(EdgeGenerator(use_spectral_norm=True))
+    self.edgeD = set_device(Discriminator(in_channels=2, use_sigmoid=config['losses']['GAN_LOSS'] != 'hinge'))
+    # Imagegenerator input: [rgb(3) + edge(1)], discriminator input: [rgb(3)]
+    self.imgG = set_device(InpaintGenerator())
+    self.imgD = set_device(Discriminator(in_channels=3, use_sigmoid=config['losses']['GAN_LOSS'] != 'hinge'))
+    self.optimG = torch.optim.Adam(list(self.edgeG.parameters()) + list(self.imgG.parameters()), lr=config['optimizer']['lr'],
+      betas=(self.config['optimizer']['beta1'], self.config['optimizer']['beta2']))
+    self.optimD = torch.optim.Adam(list(self.edgeD.parameters()) + list(self.imgD.parameters()),
+      lr=config['optimizer']['lr'] * config['optimizer']['d2glr'],
+      betas=(self.config['optimizer']['beta1'], self.config['optimizer']['beta2']))
     self.load()
     if config['distributed']:
-      self.netG = DDP(self.netG, device_ids=[config['global_rank']], output_device=config['global_rank'], 
+      self.edgeG = DDP(self.edgeG, device_ids=[config['global_rank']], output_device=config['global_rank'], 
                       broadcast_buffers=True, find_unused_parameters=False)
-      self.netD = DDP(self.netD, device_ids=[config['global_rank']], output_device=config['global_rank'], 
+      self.edgeD = DDP(self.edgeD, device_ids=[config['global_rank']], output_device=config['global_rank'], 
+                      broadcast_buffers=True, find_unused_parameters=False)
+      self.imgG = DDP(self.imgG, device_ids=[config['global_rank']], output_device=config['global_rank'], 
+                      broadcast_buffers=True, find_unused_parameters=False)
+      self.imgD = DDP(self.imgD, device_ids=[config['global_rank']], output_device=config['global_rank'], 
                       broadcast_buffers=True, find_unused_parameters=False)
 
   # get current learning rate
   def get_lr(self):
     return self.optimG.param_groups[0]['lr']
-
 
   # load netG and netD
   def load(self):
@@ -116,11 +115,13 @@ class Trainer():
       if self.config['global_rank'] == 0:
         print('Loading model from {}...'.format(gen_path))
       data = torch.load(gen_path, map_location = lambda storage, loc: set_device(storage)) 
-      self.netG.load_state_dict(data['netG'])
+      self.edgeG.load_state_dict(data['edgeG'])
+      self.imgG.load_state_dict(data['imgG'])
       data = torch.load(dis_path, map_location = lambda storage, loc: set_device(storage)) 
       self.optimG.load_state_dict(data['optimG'])
       self.optimD.load_state_dict(data['optimD'])
-      self.netD.load_state_dict(data['netD'])
+      self.edgeD.load_state_dict(data['edgeD'])
+      self.imgD.load_state_dict(data['imgD'])
       self.epoch = data['epoch']
       self.iteration = data['iteration']
     else:
@@ -133,13 +134,17 @@ class Trainer():
       gen_path = os.path.join(self.config['save_dir'], 'gen_{}.pth'.format(str(it).zfill(5)))
       dis_path = os.path.join(self.config['save_dir'], 'dis_{}.pth'.format(str(it).zfill(5)))
       print('\nsaving model to {} ...'.format(gen_path))
-      if isinstance(self.netG, torch.nn.DataParallel) or isinstance(self.netG, DDP):
-        netG, netD = self.netG.module, self.netD.module
+      if isinstance(self.edgeG, torch.nn.DataParallel) or isinstance(self.edgeG, DDP):
+        edgeG, edgeD = self.edgeG.module, self.edgeD.module
+        imgG, imgD = self.imgG.module, self.imgD.module
       else:
-        netG, netD = self.netG, self.netD
-      torch.save({'netG': netG.state_dict()}, gen_path)
+        edgeG, edgeD = self.edgeG, self.edgeD
+        imgG, imgD = self.imgG, self.imgD
+      torch.save({'edgeG': edgeG.state_dict(),
+                  'imgG': imgG.state_dict()}, gen_path)
       torch.save({'epoch': self.epoch, 'iteration': self.iteration,
-                  'netD': netD.state_dict(),
+                  'edgeD': edgeD.state_dict(),
+                  'imgD': imgD.state_dict(),
                   'optimG': self.optimG.state_dict(),
                   'optimD': self.optimD.state_dict()}, dis_path)
       os.system('echo {} > {}'.format(str(it).zfill(5), os.path.join(self.config['save_dir'], 'latest.ckpt')))
@@ -152,103 +157,71 @@ class Trainer():
   def _train_epoch(self):
     progbar = Progbar(len(self.train_dataset), width=20, stateful_metrics=['epoch', 'iter'])
     mae = 0
-    for images, masks, names in self.train_loader:
-      
-        edges_masked = (edges * (1 - masks))
-        images_masked = (images * (1 - masks)) + masks
-        inputs = torch.cat((images_masked, edges_masked, masks), dim=1)
-        outputs = self.generator(inputs)                                    # in: [grayscale(1) + edge(1) + mask(1)]
-
-        # discriminator loss
-        dis_input_real = torch.cat((images, edges), dim=1)
-        dis_input_fake = torch.cat((images, outputs.detach()), dim=1)
-        dis_real, dis_real_feat = self.discriminator(dis_input_real)        # in: (grayscale(1) + edge(1))
-        dis_fake, dis_fake_feat = self.discriminator(dis_input_fake)        # in: (grayscale(1) + edge(1))
-        dis_real_loss = self.adversarial_loss(dis_real, True, True)
-        dis_fake_loss = self.adversarial_loss(dis_fake, False, True)
-        dis_loss += (dis_real_loss + dis_fake_loss) / 2
-        # generator adversarial loss
-        gen_input_fake = torch.cat((images, outputs), dim=1)
-        gen_fake, gen_fake_feat = self.discriminator(gen_input_fake)        # in: (grayscale(1) + edge(1))
-        gen_gan_loss = self.adversarial_loss(gen_fake, True, False)
-        gen_loss += gen_gan_loss
-
-        # process outputs
-        images_masked = (images * (1 - masks).float()) + masks
-        inputs = torch.cat((images_masked, edges), dim=1)
-        outputs = self.generator(inputs)                                    # in: [rgb(3) + edge(1)]
-        gen_loss = 0
-        dis_loss = 0
-
-
-        # discriminator loss
-        dis_input_real = images
-        dis_input_fake = outputs.detach()
-        dis_real, _ = self.discriminator(dis_input_real)                    # in: [rgb(3)]
-        dis_fake, _ = self.discriminator(dis_input_fake)                    # in: [rgb(3)]
-        dis_real_loss = self.adversarial_loss(dis_real, True, True)
-        dis_fake_loss = self.adversarial_loss(dis_fake, False, True)
-        dis_loss += (dis_real_loss + dis_fake_loss) / 2
-
-
-        # generator adversarial loss
-        gen_input_fake = outputs
-        gen_fake, _ = self.discriminator(gen_input_fake)                    # in: [rgb(3)]
-        gen_gan_loss = self.adversarial_loss(gen_fake, True, False) * self.config.INPAINT_ADV_LOSS_WEIGHT
-        gen_loss += gen_gan_loss
-
-        # generator l1 loss
-        gen_l1_loss = self.l1_loss(outputs, images) * self.config.L1_LOSS_WEIGHT / torch.mean(masks)
-        gen_loss += gen_l1_loss
-
-        # generator perceptual loss
-        gen_content_loss = self.perceptual_loss(outputs, images)
-        gen_content_loss = gen_content_loss * self.config.CONTENT_LOSS_WEIGHT
-        gen_loss += gen_content_loss
-
-        # generator style loss
-        gen_style_loss = self.style_loss(outputs * masks, images * masks)
-        gen_style_loss = gen_style_loss * self.config.STYLE_LOSS_WEIGHT
-        gen_loss += gen_style_loss
-
-
-      # #######################
-      # #### old version ######
-      # #######################
+    for images, image_gray, edges, masks, names in self.train_loader:
       self.iteration += 1
       end = time.time()
-      images, masks = set_device([images, masks])
-      stage1, pred_img = self.netG(images, masks)
-      complete_img = (pred_img * masks) + (images * (1. - masks))
-      self.add_summary(self.gen_writer, 'lr/LR', self.optimG.param_groups[0]['lr'])
-      self.add_summary(self.dis_writer, 'lr/LR', self.optimD.param_groups[0]['lr'])
-      
-      # discriminator loss
-      dis_real = self.netD(images)
-      dis_fake = self.netD(complete_img.detach())
-      dis_loss = nn.ReLU()(1-dis_real).mean() + nn.ReLU()(1+dis_fake).mean()
-      self.add_summary(self.dis_writer, 'loss/adv_loss', dis_loss.item()/2.)
+      images, image_gray, edges, masks = set_device([images, image_gray, edges, masks])
+      # edge inference
+      edges_masked = (edges * (1 - masks))
+      gray_masked = (image_gray * (1 - masks)) + masks
+      inputs = torch.cat((gray_masked, edges_masked, masks), dim=1)
+      pred_edge = self.edgeG(inputs)                                    # in: [grayscale(1) + edge(1) + mask(1)]
+      # image reference
+      images_masked = (images * (1 - masks).float()) + masks
+      comp_edge = pred_edge*masks + (1-masks)*edges
+      inputs = torch.cat((images_masked, comp_edge), dim=1)
+      pred_img = self.imgG(inputs)                                    # in: [rgb(3) + edge(1)]
+
+      gen_loss = 0
+      dis_loss = 0
+      # edge discriminator loss
+      dis_input_real = torch.cat((image_gray, edges), dim=1)
+      dis_input_fake = torch.cat((image_gray, pred_edge.detach()), dim=1)
+      dis_real, _ = self.edgeD(dis_input_real)        # in: (grayscale(1) + edge(1))
+      dis_fake, _ = self.edgeD(dis_input_fake)        # in: (grayscale(1) + edge(1))
+      dis_real_loss = self.adversarial_loss(dis_real, True, True)
+      dis_fake_loss = self.adversarial_loss(dis_fake, False, True)
+      dis_loss += (dis_real_loss + dis_fake_loss) / 2
+      # image discriminator loss
+      dis_real, dis_real_feat = self.imgD(images)                    # in: [rgb(3)]
+      dis_fake, _ = self.imgD(pred_img.detach())                    # in: [rgb(3)]
+      dis_real_loss = self.adversarial_loss(dis_real, True, True)
+      dis_fake_loss = self.adversarial_loss(dis_fake, False, True)
+      dis_loss += (dis_real_loss + dis_fake_loss) / 2
       self.optimD.zero_grad()
       dis_loss.backward()
       self.optimD.step()
 
-      # generator loss
-      gen_l1_loss = nn.L1Loss()(pred_img, images) * self.config['losses']['L1_LOSS_WEIGHT'] / torch.mean(masks)
-      pyramid_loss = 0
-      for res in stage1:
-        pyramid_loss +=  nn.L1Loss()(res, F.interpolate(images, size=res.size()[2:4], mode='nearest'))
-      pyramid_loss *= self.config['losses']['PYRAMID_LOSS_WEIGHT']
+      # generator adversarial loss
+      gen_input_fake = torch.cat((image_gray, pred_edge), dim=1)
+      gen_fake, gen_fake_feat = self.edgeD(gen_input_fake)        # in: (grayscale(1) + edge(1))
+      gen_gan_loss = self.adversarial_loss(gen_fake, True, False)
+      gen_loss += gen_gan_loss
+      gen_fake, _ = self.imgD(pred_img)                    # in: [rgb(3)]
+      gen_gan_loss = self.adversarial_loss(gen_fake, True, False) * self.config['losses']['INPAINT_ADV_LOSS_WEIGHT']
+      gen_loss += gen_gan_loss
 
-      gen_fake = self.netD(complete_img)
-      gen_adv_loss = -gen_fake.mean()
-      gen_loss = gen_l1_loss + pyramid_loss + gen_adv_loss * self.config['losses']['ADV_LOSS_WEIGHT']
-      self.optimG.zero_grad()
-      gen_loss.backward()
-      self.optimG.step()
-      self.add_summary(self.gen_writer, 'loss/pyramid_loss', pyramid_loss.item())
-      self.add_summary(self.gen_writer, 'loss/L1_loss', gen_l1_loss.item())
-      self.add_summary(self.gen_writer, 'loss/adv_loss', gen_adv_loss.item())
-  
+      # generator feature matching loss
+      gen_fm_loss = 0
+      for i in range(len(dis_real_feat)):
+        gen_fm_loss += self.l1_loss(gen_fake_feat[i], dis_real_feat[i].detach())
+      gen_fm_loss = gen_fm_loss * self.config['losses']['FM_LOSS_WEIGHT']
+      gen_loss += gen_fm_loss
+
+      # generator l1 loss
+      gen_l1_loss = self.l1_loss(pred_img, images) * self.config['losses']['L1_LOSS_WEIGHT'] / torch.mean(masks)
+      gen_loss += gen_l1_loss
+
+      # generator perceptual loss
+      gen_content_loss = self.perceptual_loss(pred_img, images)
+      gen_content_loss = gen_content_loss * self.config['losses']['CONTENT_LOSS_WEIGHT']
+      gen_loss += gen_content_loss
+
+      # generator style loss
+      gen_style_loss = self.style_loss(pred_img * masks, images * masks)
+      gen_style_loss = gen_style_loss * self.config['losses']['STYLE_LOSS_WEIGHT']
+      gen_loss += gen_style_loss
+      
       # logs
       new_mae = (torch.mean(torch.abs(images - pred_img)) / torch.mean(masks)).item()
       mae = new_mae if mae == 0 else (new_mae+mae)/2
@@ -278,19 +251,28 @@ class Trainer():
       print('start evaluating ...')
     evaluation_scores = {key: 0 for key,val in self.metrics.items()}
     index = 0
-    for images, masks, names in self.valid_loader:
-      images, masks = set_device([images, masks])
+    for images, image_gray, edges, masks, names in self.valid_loader:
+      images, image_gray, edges, masks = set_device([images, image_gray, edges, masks])
       with torch.no_grad():
-        _, prd_img = self.netG(images, masks)
-      grid_img = make_grid(torch.cat([(images+1)/2, ((1-masks)*images+1)/2,
-        (prd_img+1)/2, ((1-masks)*images+masks*prd_img+1)/2], dim=0), nrow=4)
+        # edge inference
+        edges_masked = (edges * (1 - masks))
+        gray_masked = (image_gray * (1 - masks)) + masks
+        inputs = torch.cat((gray_masked, edges_masked, masks), dim=1)
+        pred_edge = self.edgeG(inputs)                                    # in: [grayscale(1) + edge(1) + mask(1)]
+        # image reference
+        images_masked = (images * (1 - masks).float()) + masks
+        comp_edge = pred_edge*masks + (1-masks)*edges
+        inputs = torch.cat((images_masked, comp_edge), dim=1)
+        pred_img = self.imgG(inputs)                                    # in: [rgb(3) + edge(1)]
+        comp_img = pred_img*masks+(1-masks)*images
+      grid_img = make_grid(torch.cat([images, images_masked, edges_masked, pred_edge, pred_img, comp_img], dim=0), nrow=6)
       save_image(grid_img, os.path.join(path, '{}_stack.png'.format(names[0].split('.')[0])))
-      orig_imgs = postprocess(images)
-      comp_imgs = postprocess((1-masks)*images+masks*prd_img)
-      Image.fromarray(orig_imgs[0]).save(os.path.join(path, '{}_orig.png'.format(names[0].split('.')[0])))
-      Image.fromarray(comp_imgs[0]).save(os.path.join(path, '{}_comp.png'.format(names[0].split('.')[0])))
+      orig_img = postprocess(images)
+      comp_img = postprocess(comp_img)
+      Image.fromarray(orig_img[0]).save(os.path.join(path, '{}_orig.png'.format(names[0].split('.')[0])))
+      Image.fromarray(comp_img[0]).save(os.path.join(path, '{}_comp.png'.format(names[0].split('.')[0])))
       for key, val in self.metrics.items():
-        evaluation_scores[key] += val(orig_imgs, comp_imgs)
+        evaluation_scores[key] += val(orig_img, comp_img)
       index += 1
     for key, val in evaluation_scores.items():
       tensor = set_device(torch.FloatTensor([val/index]))
