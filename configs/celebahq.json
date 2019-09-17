@@ -1,0 +1,43 @@
+{
+    "save_dir": "release_model/",
+    "seed": 2020,
+    "data_loader": {
+        "name": "celebahq", 
+        "zip_root": "../../datazip",
+        "flist_root": "../../flist",
+        "w": 512,
+        "h": 512,
+        "batch_size": 16,
+        "num_workers": 4
+    },
+    "losses": {
+        "L1_LOSS_WEIGHT": 1,
+        "ADV_LOSS_WEIGHT": 0.1,
+        "PYRAMID_LOSS_WEIGHT": 0.5
+    },
+    "metrics": [
+        "rmse",
+        "psnr",
+        "ssim"
+    ],
+    "optimizer": {
+        "type": "Adam",
+        "lr": 0.0001,
+        "d2glr": 0.1, 
+        "beta1": 0.5,
+        "beta2": 0.9,
+        "weight_decay": 0,
+        "amsgrad": true
+    },
+    "trainer": {
+        "iterations": 200000,
+        "save_freq": 5000,
+        "valid_freq": 10000,
+        "verbosity": 2,
+        "n_critic": 5
+    },
+    "logger": {
+        "log_step": 100,
+        "tensorboardX": true
+    }
+}
