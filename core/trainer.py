@@ -57,9 +57,9 @@ class Trainer():
       pin_memory=True, sampler=self.valid_sampler, worker_init_fn=worker_init_fn)
 
     # set up losses and metrics
-    self.adversarial_loss = AdversarialLoss(type=self.config['losses']['GAN_LOSS'])
-    self.perceptual_loss = PerceptualLoss()
-    self.style_loss = StyleLoss()
+    self.adversarial_loss = set_device(AdversarialLoss(type=self.config['losses']['GAN_LOSS']))
+    self.perceptual_loss = set_device(PerceptualLoss())
+    self.style_loss = set_device(StyleLoss())
     self.l1_loss = nn.L1Loss()
     self.metrics = {met: getattr(module_metric, met) for met in config['metrics']}
     self.dis_writer = None
@@ -265,7 +265,8 @@ class Trainer():
         inputs = torch.cat((images_masked, comp_edge), dim=1)
         pred_img = self.imgG(inputs)                                    # in: [rgb(3) + edge(1)]
         comp_img = pred_img*masks+(1-masks)*images
-      grid_img = make_grid(torch.cat([images, images_masked, edges_masked, pred_edge, pred_img, comp_img], dim=0), nrow=6)
+      grid_img = make_grid(torch.cat([images, images_masked, edges_masked.repeat(1,3,1,1),
+        pred_edge.repeat(1,3,1,1), pred_img, comp_img], dim=0), nrow=6)
       save_image(grid_img, os.path.join(path, '{}_stack.png'.format(names[0].split('.')[0])))
       orig_img = postprocess(images)
       comp_img = postprocess(comp_img)
