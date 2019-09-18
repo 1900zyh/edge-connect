@@ -221,6 +221,9 @@ class Trainer():
       gen_style_loss = self.style_loss(pred_img * masks, images * masks)
       gen_style_loss = gen_style_loss * self.config['losses']['STYLE_LOSS_WEIGHT']
       gen_loss += gen_style_loss
+      self.optimG.zero_grad()
+      gen_loss.backward()
+      self.optimG.step()
       
       # logs
       new_mae = (torch.mean(torch.abs(images - pred_img)) / torch.mean(masks)).item()
