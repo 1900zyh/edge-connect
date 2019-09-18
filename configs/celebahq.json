@@ -20,7 +20,7 @@
         "INPAINT_ADV_LOSS_WEIGHT": 0.1
     },
     "metrics": [
-        "rmse",
+        "mae",
         "psnr",
         "ssim"
     ],
