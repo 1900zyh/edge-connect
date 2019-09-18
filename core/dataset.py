@@ -1,4 +1,3 @@
-from scipy.misc import imread
 from skimage.feature import canny
 from skimage.color import rgb2gray, gray2rgb
 
@@ -64,9 +63,9 @@ class Dataset(torch.utils.data.Dataset):
     mask = mask.resize((self.w, self.h), Image.NEAREST)
     
     # load edge and gray image
-    img_gray = img.convert('L')
-    edge = canny(img_gray, sigma=2, mask=mask).astype(np.float)
-    return F.to_tensor(img), F.to_tensor(img_gray), self.to_tensor(edge), F.to_tensor(mask), img_name
+    img_gray = Image.fromarray(rgb2gray(np.array(img)))
+    edge = Image.fromarray(canny(np.array(img_gray), sigma=2).astype(np.float))
+    return F.to_tensor(img), F.to_tensor(img_gray), F.to_tensor(edge), F.to_tensor(mask), img_name
 
   def create_iterator(self, batch_size):
     while True:
