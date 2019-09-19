@@ -31,6 +31,10 @@ class Dataset(torch.utils.data.Dataset):
     if debug:
       self.data = self.data[:100]
 
+  def set_subset(self, start, end):
+    self.data = self.data[start:end]
+    self.mask = self.mask[start:end]
+
   def __len__(self):
     return len(self.data)
 

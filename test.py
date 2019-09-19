@@ -31,8 +31,7 @@ import glob
 
 ### My libs
 from core.utils import set_device, postprocess, ZipReader, set_seed
-from core.utils import postprocess, unnormalize
-from core.model import PConvUNet
+from core.utils import postprocess
 from core.dataset import Dataset
 from core.model import EdgeGenerator, InpaintGenerator
  
@@ -45,13 +44,14 @@ args = parser.parse_args()
 BATCH_SIZE = 4
 
 def main_worker(gpu, ngpus_per_node, config):
+  torch.cuda.set_device(gpu)
   set_seed(config['seed'])
 
   # Model and version
   edgeG = set_device(EdgeGenerator(use_spectral_norm=True))
   imgG = set_device(InpaintGenerator())
   latest_epoch = open(os.path.join(config['save_dir'], 'latest.ckpt'), 'r').read().splitlines()[-1]
-  path = os.path.join(config['save_dir'], latest_epoch+'.pth')
+  path = os.path.join(config['save_dir'], 'gen_{}.pth'.format(latest_epoch))
   data = torch.load(path, map_location = lambda storage, loc: set_device(storage)) 
   edgeG.load_state_dict(data['edgeG'])
   imgG.load_state_dict(data['imgG'])
