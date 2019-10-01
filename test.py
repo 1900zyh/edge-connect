@@ -76,11 +76,13 @@ def main_worker(gpu, ngpus_per_node, config):
     edges_masked = (edges * (1 - masks))
     gray_masked = (image_gray * (1 - masks)) + masks
     inputs = torch.cat((gray_masked, edges_masked, masks), dim=1)
-    pred_edge = edgeG(inputs)                                    # in: [grayscale(1) + edge(1) + mask(1)]
+    with torch.no_grad():
+      pred_edge = edgeG(inputs)                                    # in: [grayscale(1) + edge(1) + mask(1)]
     images_masked = (images * (1 - masks).float()) + masks
     comp_edge = pred_edge*masks + (1-masks)*edges
     inputs = torch.cat((images_masked, comp_edge), dim=1)
-    pred_img = imgG(inputs)                                    # in: [rgb(3) + edge(1)]
+    with torch.no_grad():
+      pred_img = imgG(inputs)                                    # in: [rgb(3) + edge(1)]
     orig_imgs = list(postprocess(images))
     comp_imgs = list(postprocess(masks*pred_img+(1-masks)*images))
     for i in range(len(orig_imgs)):

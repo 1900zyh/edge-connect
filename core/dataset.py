@@ -57,7 +57,7 @@ class Dataset(torch.utils.data.Dataset):
     mask_path = os.path.dirname(self.mask[m_index]) + '.zip'
     mask_name = os.path.basename(self.mask[m_index])
     if self.level is not None:
-      mask_name = str(index%2000 + self.level*2000)
+      mask_name = '{}.png'.format(str(index%2000 + self.level*2000).zfill(5))
     mask = ZipReader.imread(mask_path, mask_name).convert('L')
     # augment 
     if self.split == 'train': 
