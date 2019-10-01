@@ -36,7 +36,7 @@ def main():
   real_images = []
   fake_images = []
   evaluation_scores = {key: 0 for key,val in metrics.items()}
-  for rname, fname in zip(real_names):
+  for rname, fname in zip(real_names, fake_names):
     rimg = Image.open(rname)
     fimg = Image.open(fname)
     real_images.append(np.array(rimg))
